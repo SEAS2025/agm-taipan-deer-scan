@@ -27,6 +27,12 @@ python agm_web_scanner.py
 
 Open http://127.0.0.1:8080 in your browser.
 
+**Try without hardware** (demo mode with synthetic thermal feed):
+
+```powershell
+python agm_web_scanner.py --demo --no-browser
+```
+
 Or run the desktop scanner:
 
 ```powershell
@@ -47,9 +53,12 @@ Use `agm_taipan_stream_explorer.py --probe-rtsp` to discover alternate RTSP path
 
 ```powershell
 python agm_web_scanner.py --port 8080
+python agm_web_scanner.py --demo                    # UI test without Taipan
 python agm_web_scanner.py --model agm_deer_ml/models/deer_thermal_best.pt
 python agm_web_scanner.py --no-audio --no-browser
 ```
+
+The web UI includes live MJPEG video, sensitivity control, scope zoom/palette/brightness (via ISAPI), snapshots, and browser + server audio alerts.
 
 ## Train a YOLO deer model
 
@@ -60,7 +69,9 @@ See [agm_deer_ml/README.md](agm_deer_ml/README.md) for dataset prep and training
 ```
 agm_web_scanner.py          # Browser-based scanner (Flask)
 agm_deer_scanner.py         # Desktop OpenCV scanner + shared detection logic
+agm_scope_control.py        # ISAPI scope control (zoom, palette, image)
 agm_taipan_stream_explorer.py
+web/                        # Web UI (HTML, CSS, JS)
 agm_deer_ml/                # YOLO training scripts and docs
 requirements.txt
 ```

@@ -17,6 +17,7 @@ agm_deer_ml/data.yaml
 
 # Runtime captures
 deer_scan_*.jpg
+snapshots/
 *.mp4
 *.avi
 

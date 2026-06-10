@@ -2,24 +2,28 @@
 Lightweight local web scanner for AGM Taipan thermal deer detection.
 
   python agm_web_scanner.py
+  python agm_web_scanner.py --demo          # synthetic feed, no scope needed
   python agm_web_scanner.py --port 8080
 
 Open http://127.0.0.1:8080 in a browser (auto-opens on start).
-Connect laptop to Taipan hotspot before starting.
+Connect laptop to Taipan hotspot before starting (unless --demo).
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 import threading
 import time
 import webbrowser
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import cv2
 import numpy as np
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, request, send_from_directory
 
 from agm_deer_scanner import (
     DEER_PROFILE,
@@ -28,15 +32,19 @@ from agm_deer_scanner import (
     YoloDeerDetector,
     make_detector,
 )
+from agm_scope_control import ScopeControl
 
 DEFAULT_URL = "rtsp://admin:abcd1234@10.15.12.1:554/Streaming/Channels/101"
+WEB_DIR = Path(__file__).resolve().parent / "web"
+SNAPSHOT_DIR = Path(__file__).resolve().parent / "snapshots"
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder=str(WEB_DIR / "static"), static_url_path="/static")
 
 
 @dataclass
 class ScanState:
     url: str = DEFAULT_URL
+    demo: bool = False
     sensitivity: float = 1.0
     yolo_conf: float = 0.35
     use_yolo: bool = False
@@ -45,6 +53,7 @@ class ScanState:
     fps: float = 0.0
     armed: bool = False
     detections: int = 0
+    deer_hits: int = 0
     connected: bool = False
     reconnect_requested: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -53,11 +62,19 @@ class ScanState:
 
 
 state = ScanState()
-detector = None  # set in main
+detector = None
 alerts: Optional[AlertManager] = None
+scope: Optional[ScopeControl] = None
 
 
-def draw_hud(frame: np.ndarray, dets: list[Detection], status: str, fps: float, armed: bool, sens: float):
+def draw_hud(
+    frame: np.ndarray,
+    dets: list[Detection],
+    status: str,
+    fps: float,
+    armed: bool,
+    sens: float,
+):
     out = frame.copy()
     h, w = out.shape[:2]
     for d in dets:
@@ -65,18 +82,39 @@ def draw_hud(frame: np.ndarray, dets: list[Detection], status: str, fps: float, 
         is_deer = d.score >= DEER_PROFILE["score_threshold"]
         color = (0, 0, 255) if is_deer else (0, 165, 255)
         cv2.rectangle(out, (x, y), (x + bw, y + bh), color, 3 if is_deer else 1)
-        cv2.putText(out, f"{d.label} {d.score:.0%}", (x, max(y - 8, 16)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+        cv2.putText(
+            out,
+            f"{d.label} {d.score:.0%}",
+            (x, max(y - 8, 16)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            color,
+            2,
+        )
     cx, cy = w // 2, h // 2
     cv2.line(out, (cx - 30, cy), (cx + 30, cy), (0, 255, 0), 1)
     cv2.line(out, (cx, cy - 30), (cx, cy + 30), (0, 255, 0), 1)
     bar_color = (0, 0, 255) if armed else (0, 200, 0)
     cv2.rectangle(out, (0, 0), (w, 36), (0, 0, 0), -1)
-    cv2.putText(out, f"DEER SCAN | {status} | {fps:.1f} FPS | sens {sens:.1f}",
-                (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, bar_color, 2)
+    cv2.putText(
+        out,
+        f"DEER SCAN | {status} | {fps:.1f} FPS | sens {sens:.1f}",
+        (8, 24),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        bar_color,
+        2,
+    )
     if armed:
-        cv2.putText(out, "!!! DEER !!!", (w // 2 - 120, 80),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+        cv2.putText(
+            out,
+            "!!! DEER !!!",
+            (w // 2 - 120, 80),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.2,
+            (0, 0, 255),
+            3,
+        )
     return out
 
 
@@ -86,9 +124,82 @@ def open_capture(url: str):
     return cap
 
 
+class DemoFeed:
+    """Synthetic thermal-like frames with moving hot blobs for UI testing."""
+
+    def __init__(self, width: int = 640, height: int = 480):
+        self.w = width
+        self.h = height
+        self.t = 0.0
+        self.blobs = [
+            {"x": 120, "y": 200, "vx": 0.8, "vy": 0.3, "r": 28},
+            {"x": 400, "y": 280, "vx": -0.5, "vy": 0.2, "r": 22},
+        ]
+
+    def read(self) -> tuple[bool, np.ndarray]:
+        self.t += 0.05
+        rng = np.random.default_rng(int(self.t * 100) % 10000)
+        gray = rng.integers(20, 45, (self.h, self.w), dtype=np.uint8)
+        gray = cv2.GaussianBlur(gray, (7, 7), 0)
+
+        for b in self.blobs:
+            b["x"] += b["vx"]
+            b["y"] += b["vy"]
+            if b["x"] < 40 or b["x"] > self.w - 40:
+                b["vx"] *= -1
+            if b["y"] < 40 or b["y"] > self.h - 40:
+                b["vy"] *= -1
+            cx, cy, r = int(b["x"]), int(b["y"]), b["r"]
+            cv2.circle(gray, (cx, cy), r, 220, -1)
+            cv2.circle(gray, (cx, cy), max(4, r // 3), 255, -1)
+
+        if math.sin(self.t * 0.7) > 0.85:
+            ex = int(self.w * 0.65 + 30 * math.sin(self.t))
+            ey = int(self.h * 0.35)
+            cv2.ellipse(gray, (ex, ey), (18, 36), 0, 0, 360, 240, -1)
+
+        frame = cv2.applyColorMap(gray, cv2.COLORMAP_INFERNO)
+        time.sleep(0.04)
+        return True, frame
+
+
+def process_frame(frame: np.ndarray, confirm_streak: int, score_threshold: float) -> tuple[np.ndarray, str, bool, int, int, int]:
+    with state.lock:
+        sens = state.yolo_conf if state.use_yolo else state.sensitivity
+
+    dets = detector.detect(frame)
+    if state.use_yolo:
+        deer_hits = [d for d in dets if d.score >= sens]
+    else:
+        eff = score_threshold / max(sens, 0.5)
+        deer_hits = [d for d in dets if d.score >= eff]
+
+    if deer_hits:
+        confirm_streak += 1
+    else:
+        confirm_streak = max(0, confirm_streak - 1)
+
+    armed = confirm_streak >= DEER_PROFILE["confirm_frames"]
+    if armed:
+        status = f"DEER ALERT ({len(deer_hits)})"
+        if alerts:
+            with state.lock:
+                alerts.muted = state.muted
+            alerts.trigger(len(deer_hits))
+        confirm_streak = 0
+    elif deer_hits:
+        status = f"TRACKING ({len(deer_hits)})"
+    else:
+        status = "SCANNING"
+
+    display = draw_hud(frame, dets, status, 0.0, armed, sens)
+    return display, status, armed, len(dets), len(deer_hits), confirm_streak
+
+
 def capture_loop():
     global detector, alerts
     cap = None
+    demo: Optional[DemoFeed] = None
     confirm_streak = 0
     fps_t = time.time()
     fps_n = 0
@@ -100,33 +211,45 @@ def capture_loop():
     while True:
         with state.lock:
             url = state.url
+            demo_mode = state.demo
             if state.reconnect_requested:
                 state.reconnect_requested = False
                 if cap:
                     cap.release()
                     cap = None
+                demo = None
 
-        if cap is None or not cap.isOpened():
-            with state.lock:
-                state.status = "CONNECTING"
-                state.connected = False
-            if cap:
-                cap.release()
-            cap = open_capture(url)
-            if not cap.isOpened():
-                time.sleep(2)
-                continue
-            with state.lock:
-                state.connected = True
-                state.status = "SCANNING"
-            confirm_streak = 0
-            frame_i = 0
+        if demo_mode:
+            if demo is None:
+                demo = DemoFeed()
+                with state.lock:
+                    state.connected = True
+                    state.status = "DEMO SCANNING"
+            ok, frame = demo.read()
+        else:
+            if cap is None or not cap.isOpened():
+                with state.lock:
+                    state.status = "CONNECTING"
+                    state.connected = False
+                if cap:
+                    cap.release()
+                cap = open_capture(url)
+                if not cap.isOpened():
+                    time.sleep(2)
+                    continue
+                with state.lock:
+                    state.connected = True
+                    state.status = "SCANNING"
+                confirm_streak = 0
+                frame_i = 0
 
-        ok, frame = cap.read()
+            ok, frame = cap.read()
+
         if not ok or frame is None:
-            if time.time() - last_ok > 3:
-                cap.release()
-                cap = None
+            if not demo_mode and time.time() - last_ok > 3:
+                if cap:
+                    cap.release()
+                    cap = None
             time.sleep(0.05)
             continue
         last_ok = time.time()
@@ -137,151 +260,32 @@ def capture_loop():
             fps_n = 0
             fps_t = time.time()
 
-        with state.lock:
-            sens = state.yolo_conf if state.use_yolo else state.sensitivity
-
         if frame_i % 2 == 0:
-            dets = detector.detect(frame)
-            if state.use_yolo:
-                deer_hits = [d for d in dets if d.score >= sens]
-            else:
-                eff = score_threshold / max(sens, 0.5)
-                deer_hits = [d for d in dets if d.score >= eff]
-            if deer_hits:
-                confirm_streak += 1
-            else:
-                confirm_streak = max(0, confirm_streak - 1)
-            armed = confirm_streak >= DEER_PROFILE["confirm_frames"]
-            if armed:
-                status = f"DEER ALERT ({len(deer_hits)})"
-                if alerts:
-                    alerts.muted = state.muted
-                    alerts.trigger(len(deer_hits))
-                confirm_streak = 0
-            elif deer_hits:
-                status = f"TRACKING ({len(deer_hits)})"
-            else:
-                status = "SCANNING"
-            display = draw_hud(frame, dets, status, fps, armed, sens)
+            display, status, armed, det_n, deer_n, confirm_streak = process_frame(
+                frame, confirm_streak, score_threshold
+            )
             with state.lock:
                 state.status = status
                 state.fps = fps
                 state.armed = armed
-                state.detections = len(dets)
+                state.detections = det_n
+                state.deer_hits = deer_n
         else:
             with state.lock:
                 status = state.status
                 armed = state.armed
+                sens = state.yolo_conf if state.use_yolo else state.sensitivity
             display = draw_hud(frame, [], status, fps, armed, sens)
 
-        ok_enc, buf = cv2.imencode(".jpg", display, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        ok_enc, buf = cv2.imencode(".jpg", display, [cv2.IMWRITE_JPEG_QUALITY, 82])
         if ok_enc:
             with state.jpeg_lock:
                 state.jpeg = buf.tobytes()
 
 
-HTML_PAGE = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AGM Deer Scan</title>
-<style>
-  * { box-sizing: border-box; }
-  body { margin: 0; font-family: Segoe UI, sans-serif; background: #1a1a1a; color: #eee; }
-  header { padding: 12px 16px; background: #0d3d0d; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
-  header h1 { margin: 0; font-size: 1.1rem; flex: 1; }
-  .badge { padding: 4px 10px; border-radius: 4px; font-weight: 600; font-size: 0.85rem; }
-  .badge.scan { background: #2d5a2d; }
-  .badge.alert { background: #8b0000; animation: pulse 0.8s infinite; }
-  @keyframes pulse { 50% { opacity: 0.7; } }
-  main { display: grid; grid-template-columns: 1fr 280px; gap: 0; min-height: calc(100vh - 52px); }
-  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
-  .video-wrap { background: #000; display: flex; align-items: center; justify-content: center; min-height: 400px; }
-  .video-wrap img { max-width: 100%; max-height: calc(100vh - 120px); object-fit: contain; }
-  aside { padding: 16px; background: #252525; border-left: 1px solid #333; }
-  label { display: block; margin: 12px 0 6px; font-size: 0.9rem; color: #aaa; }
-  input[type=range] { width: 100%; }
-  .val { font-size: 1.4rem; font-weight: 600; color: #6f6; }
-  button { width: 100%; margin-top: 8px; padding: 12px; font-size: 1rem; border: none; border-radius: 6px; cursor: pointer; }
-  .btn-mute { background: #444; color: #fff; }
-  .btn-mute.on { background: #633; }
-  .btn-reconnect { background: #335; color: #fff; }
-  .stats { margin-top: 20px; font-size: 0.85rem; color: #999; line-height: 1.8; }
-  .hint { margin-top: 16px; font-size: 0.75rem; color: #666; }
-</style>
-</head>
-<body>
-<header>
-  <h1>AGM Taipan — Deer Scan</h1>
-  <span id="statusBadge" class="badge scan">SCANNING</span>
-  <span id="fps">0 FPS</span>
-</header>
-<main>
-  <div class="video-wrap">
-    <img id="feed" src="/video.mjpg" alt="Live thermal feed">
-  </div>
-  <aside>
-    <label>Sensitivity <span class="val" id="sensVal">1.0</span></label>
-    <input type="range" id="sens" min="0" max="100" value="33">
-    <p style="font-size:0.8rem;color:#888;margin:4px 0 0">Lower = fewer alerts</p>
-    <button class="btn-mute" id="muteBtn">Mute audio</button>
-    <button class="btn-reconnect" id="reconnectBtn">Reconnect stream</button>
-    <div class="stats">
-      <div>Detections: <span id="detCount">0</span></div>
-      <div>Stream: <span id="conn">…</span></div>
-    </div>
-    <p class="hint">Connect to Taipan hotspot first. Press F11 for fullscreen.</p>
-  </aside>
-</main>
-<script>
-const sens = document.getElementById('sens');
-const sensVal = document.getElementById('sensVal');
-const muteBtn = document.getElementById('muteBtn');
-let muted = false;
-
-function sensFromSlider(v) { return 0.5 + (v / 100) * 1.5; }
-function sliderFromSens(s) { return Math.round(((s - 0.5) / 1.5) * 100); }
-
-sens.addEventListener('input', () => {
-  const v = sensFromSlider(+sens.value);
-  sensVal.textContent = v.toFixed(1);
-  fetch('/api/sensitivity', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({value: v}) });
-});
-
-muteBtn.onclick = () => {
-  muted = !muted;
-  muteBtn.textContent = muted ? 'Unmute audio' : 'Mute audio';
-  muteBtn.classList.toggle('on', muted);
-  fetch('/api/mute', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({muted}) });
-};
-
-document.getElementById('reconnectBtn').onclick = () => fetch('/api/reconnect', {method: 'POST'});
-
-async function poll() {
-  try {
-    const r = await fetch('/api/status');
-    const j = await r.json();
-    document.getElementById('fps').textContent = j.fps.toFixed(1) + ' FPS';
-    document.getElementById('detCount').textContent = j.detections;
-    document.getElementById('conn').textContent = j.connected ? 'Connected' : 'Reconnecting…';
-    const b = document.getElementById('statusBadge');
-    b.textContent = j.status;
-    b.className = 'badge ' + (j.armed ? 'alert' : 'scan');
-    if (j.use_yolo) sensVal.textContent = j.sensitivity.toFixed(2) + ' conf';
-    else sensVal.textContent = j.sensitivity.toFixed(1);
-  } catch (e) {}
-}
-setInterval(poll, 1000);
-poll();
-</script>
-</body>
-</html>"""
-
-
 @app.route("/")
 def index():
-    return HTML_PAGE
+    return send_from_directory(WEB_DIR, "index.html")
 
 
 @app.route("/video.mjpg")
@@ -291,8 +295,9 @@ def video():
             with state.jpeg_lock:
                 frame = state.jpeg
             if frame:
-                yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
+                yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
             time.sleep(0.04)
+
     return Response(gen(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
@@ -300,15 +305,19 @@ def video():
 def api_status():
     with state.lock:
         sens = state.yolo_conf if state.use_yolo else state.sensitivity
+        scope_info = scope.as_dict() if scope else None
         return jsonify(
             status=state.status,
             fps=state.fps,
             armed=state.armed,
             detections=state.detections,
+            deer_hits=state.deer_hits,
             connected=state.connected,
             sensitivity=sens,
             muted=state.muted,
             use_yolo=state.use_yolo,
+            demo=state.demo,
+            scope=scope_info,
         )
 
 
@@ -343,12 +352,76 @@ def api_reconnect():
     return jsonify(ok=True)
 
 
+@app.route("/api/snapshot", methods=["POST"])
+def api_snapshot():
+    SNAPSHOT_DIR.mkdir(exist_ok=True)
+    with state.jpeg_lock:
+        data = state.jpeg
+    if not data:
+        return jsonify(ok=False, error="no frame"), 503
+    name = f"deer_scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+    path = SNAPSHOT_DIR / name
+    path.write_bytes(data)
+    return jsonify(ok=True, filename=name, url=f"/snapshots/{name}")
+
+
+@app.route("/snapshots/<path:filename>")
+def snapshots(filename):
+    return send_from_directory(SNAPSHOT_DIR, filename)
+
+
+@app.route("/api/scope/zoom", methods=["POST"])
+def api_scope_zoom():
+    data = request.get_json(force=True, silent=True) or {}
+    if scope and scope.enabled:
+        scope.set_zoom(int(data.get("index", 0)))
+    return jsonify(ok=True)
+
+
+@app.route("/api/scope/palette", methods=["POST"])
+def api_scope_palette():
+    data = request.get_json(force=True, silent=True) or {}
+    if scope and scope.enabled:
+        scope.set_palette(int(data.get("index", 0)))
+    return jsonify(ok=True)
+
+
+@app.route("/api/scope/image", methods=["POST"])
+def api_scope_image():
+    data = request.get_json(force=True, silent=True) or {}
+    if scope and scope.enabled:
+        scope.set_brightness_contrast(
+            int(data.get("brightness", 50)),
+            int(data.get("contrast", 50)),
+        )
+    return jsonify(ok=True)
+
+
+def init_scope(host: str, demo: bool):
+    global scope
+    if demo:
+        scope = ScopeControl(enabled=False)
+        return
+    scope = ScopeControl(host=host)
+
+    def _connect():
+        if scope.ping():
+            print("Scope ISAPI connected — web sliders control device.")
+            scope.sync_from_device()
+        else:
+            print("Scope not reachable — video only (connect to Taipan hotspot for ISAPI).")
+
+    threading.Thread(target=_connect, daemon=True).start()
+
+
 def main():
     global detector, alerts
     ap = argparse.ArgumentParser(description="AGM Taipan web deer scanner")
     ap.add_argument("--url", default=DEFAULT_URL)
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--scope-host", default="10.15.12.1", help="Taipan ISAPI IP")
+    ap.add_argument("--demo", action="store_true", help="Synthetic demo feed (no camera)")
     ap.add_argument("--no-audio", action="store_true")
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--model", help="YOLO .pt weights path")
@@ -361,14 +434,19 @@ def main():
     else:
         state.sensitivity = detector.state.sensitivity
     state.url = args.url
+    state.demo = args.demo
     alerts = AlertManager(enabled=not args.no_audio)
+    init_scope(args.scope_host, args.demo)
 
     t = threading.Thread(target=capture_loop, name="capture", daemon=True)
     t.start()
 
     url = f"http://{args.host}:{args.port}/"
     print(f"AGM Web Scanner running at {url}")
-    print("Connect laptop to Taipan hotspot for video.")
+    if args.demo:
+        print("Demo mode — synthetic thermal feed.")
+    else:
+        print("Connect laptop to Taipan hotspot for video.")
     if not args.no_browser:
         threading.Timer(1.2, lambda: webbrowser.open(url)).start()
 

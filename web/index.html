@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AGM Deer Scan</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+  <div id="alertOverlay" class="alert-overlay hidden" aria-hidden="true">
+    <div class="alert-banner">DEER DETECTED AHEAD</div>
+  </div>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">◉</span>
+      <div>
+        <h1>AGM Taipan</h1>
+        <p class="subtitle">Deer Thermal Scan</p>
+      </div>
+    </div>
+    <div class="topbar-stats">
+      <span id="statusBadge" class="badge scan">STARTING</span>
+      <span id="fps" class="stat">0.0 FPS</span>
+      <span id="detectorMode" class="stat muted">—</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="video-panel">
+      <div class="video-frame">
+        <img id="feed" src="/video.mjpg" alt="Live thermal feed">
+        <div id="feedPlaceholder" class="feed-placeholder hidden">
+          <p>Waiting for stream…</p>
+          <p class="hint">Connect to the Taipan hotspot, or run with <code>--demo</code></p>
+        </div>
+        <div class="hud-corner tl"></div>
+        <div class="hud-corner tr"></div>
+        <div class="hud-corner bl"></div>
+        <div class="hud-corner br"></div>
+      </div>
+      <div class="video-footer">
+        <span id="deerCount">0 deer tracked</span>
+        <span id="streamState">Stream: connecting…</span>
+      </div>
+    </section>
+
+    <aside class="controls">
+      <section class="panel">
+        <h2>Detection</h2>
+        <label class="control-label">
+          Sensitivity
+          <span id="sensVal" class="control-value">1.0</span>
+        </label>
+        <input type="range" id="sens" min="0" max="100" value="33">
+        <p class="control-hint">Lower = fewer alerts</p>
+        <div class="btn-row">
+          <button type="button" id="muteBtn" class="btn btn-secondary">Mute audio</button>
+          <button type="button" id="snapshotBtn" class="btn btn-secondary">Snapshot</button>
+        </div>
+        <button type="button" id="reconnectBtn" class="btn btn-primary">Reconnect stream</button>
+      </section>
+
+      <section class="panel">
+        <h2>Scope</h2>
+        <p id="scopeStatus" class="scope-status">Scope: checking…</p>
+        <label class="control-label">
+          Zoom
+          <span id="zoomVal" class="control-value">1x</span>
+        </label>
+        <input type="range" id="zoom" min="0" max="3" value="0" step="1">
+        <label class="control-label">
+          Palette
+          <span id="paletteVal" class="control-value">White Hot</span>
+        </label>
+        <select id="palette" class="select"></select>
+        <label class="control-label">
+          Brightness
+          <span id="brightVal" class="control-value">50</span>
+        </label>
+        <input type="range" id="bright" min="0" max="100" value="50">
+        <label class="control-label">
+          Contrast
+          <span id="contrastVal" class="control-value">50</span>
+        </label>
+        <input type="range" id="contrast" min="0" max="100" value="50">
+      </section>
+
+      <section class="panel stats-panel">
+        <h2>Status</h2>
+        <dl class="stats">
+          <div><dt>Detections</dt><dd id="detCount">0</dd></div>
+          <div><dt>Deer hits</dt><dd id="deerHits">0</dd></div>
+          <div><dt>Mode</dt><dd id="demoFlag">Live</dd></div>
+        </dl>
+        <p class="footer-hint">F11 for fullscreen · Connect to Taipan hotspot for live video and scope control</p>
+      </section>
+    </aside>
+  </main>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
