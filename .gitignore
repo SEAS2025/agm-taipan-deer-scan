@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# ML artifacts (download/train locally)
+agm_deer_ml/dataset/
+agm_deer_ml/dataset_raw/
+agm_deer_ml/runs/
+agm_deer_ml/Drone-based-wildlife-monitoring/
+agm_deer_ml/*.pt
+agm_deer_ml/models/*.pt
+agm_deer_ml/data.yaml
+
+# Runtime captures
+deer_scan_*.jpg
+*.mp4
+*.avi
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
