@@ -23,11 +23,11 @@ USER = "admin"
 PWD = "abcd1234"
 CHANNEL = 1
 
+# Taipan ISAPI uses PascalCase palette modes (WhiteHot not whiteHot)
 PALETTES = [
-    ("Black Hot", "blackHot"),
-    ("White Hot", "whiteHot"),
-    ("Red Hot", "redHot"),
-    ("Fusion", "fusion"),
+    ("Black Hot", "BlackHot"),
+    ("White Hot", "WhiteHot"),
+    ("Red Hot", "RedHot"),
 ]
 
 ZOOM_STEPS = [1, 2, 4, 8]
@@ -113,49 +113,27 @@ class ScopeControl:
 
     def _set_palette_sync(self, index: int):
         _, mode = PALETTES[index]
-        if not self._throttle():
-            return
-        paths = [
-            f"/ISAPI/Image/channels/{self.channel}/Palettes",
-            f"/ISAPI/Thermal/channels/{self.channel}/palettes",
-        ]
+        path = f"/ISAPI/Image/channels/{self.channel}/Palettes"
         with self._lock:
-            for path in paths:
-                try:
-                    code, xml = self._get(path)
-                except Exception:
-                    continue
-                if code != 200:
-                    continue
-                body = xml
-                for tag in ("mode", "paletteMode", "palettesMode"):
-                    if f"<{tag}>" in body or f"<{tag} " in body:
-                        body = self._set_xml_text(body, tag, mode)
-                        break
-                else:
-                    body = re.sub(
-                        r"(<[^>]+>)(\s*)",
-                        rf"\1\2<paletteMode>{mode}</paletteMode>\2",
-                        body,
-                        count=1,
-                    )
-                try:
-                    pc, _ = self._put(path, body)
-                except Exception:
-                    continue
-                if pc in (200, 204):
-                    print(f"Palette -> {PALETTES[index][0]} ({mode})")
-                    self._connected = True
-                    return
-                body2 = self._set_xml_text(xml, "paletteMode", mode)
-                try:
-                    pc2, _ = self._put(path, body2)
-                except Exception:
-                    continue
-                if pc2 in (200, 204):
-                    print(f"Palette -> {PALETTES[index][0]}")
-                    self._connected = True
-                    return
+            try:
+                code, xml = self._get(path)
+            except Exception as e:
+                print(f"Palette read failed: {e}")
+                return
+            if code != 200:
+                print(f"Palette read HTTP {code}")
+                return
+            body = self._set_xml_text(xml, "mode", mode)
+            try:
+                pc, resp = self._put(path, body)
+            except Exception as e:
+                print(f"Palette write failed: {e}")
+                return
+            if pc in (200, 204):
+                print(f"Palette -> {PALETTES[index][0]} ({mode})")
+                self._connected = True
+            else:
+                print(f"Palette HTTP {pc}: {resp[:120]}")
 
     def set_zoom(self, index: int) -> bool:
         index = max(0, min(len(ZOOM_STEPS) - 1, index))

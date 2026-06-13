@@ -17,6 +17,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 RAW = ROOT / "dataset_raw"
+INTERNET = ROOT / "dataset_internet"
+USER_DAID = Path(r"C:\Users\User\agm_deer_ml")
 OUT = ROOT / "dataset"
 IMG_EXTS = {".jpg", ".jpeg", ".png"}
 
@@ -63,10 +65,67 @@ def add_custom_folder(custom: Path, split: str = "train", val_ratio: float = 0.1
             (lbl_dir / (img.stem + ".txt")).write_text("", encoding="utf-8")
 
 
+def import_internet_labeled():
+    """Merge auto-labeled internet visual + thermal images."""
+    n = 0
+    for sub in ("visual", "thermal"):
+        folder = INTERNET / sub
+        if not folder.exists():
+            continue
+        for img in folder.rglob("*"):
+            if img.suffix.lower() not in IMG_EXTS or img.parent.name == "labels":
+                continue
+            lbl = img.with_suffix(".txt")
+            if not lbl.exists():
+                continue
+            sp = "val" if n % 5 == 0 else "train"
+            img_dir = OUT / "images" / sp
+            lbl_dir = OUT / "labels" / sp
+            img_dir.mkdir(parents=True, exist_ok=True)
+            lbl_dir.mkdir(parents=True, exist_ok=True)
+            stem = f"inet_{sub}_{img.stem}"
+            shutil.copy2(img, img_dir / f"{stem}{img.suffix.lower()}")
+            shutil.copy2(lbl, lbl_dir / f"{stem}.txt")
+            n += 1
+    return n
+
+
+def import_user_daid():
+    """Import existing local DAID-T dataset if repo dataset_raw is empty."""
+    if any((RAW / p).exists() for p in ("train_part_1", "train_part_2", "val")):
+        return 0
+    src_train = USER_DAID / "dataset" / "images" / "train"
+    src_val = USER_DAID / "dataset" / "images" / "val"
+    if not src_train.exists():
+        return 0
+    n = 0
+    for split, src in (("train", src_train), ("val", src_val)):
+        lbl_src = USER_DAID / "dataset" / "labels" / split
+        if not src.exists():
+            continue
+        for img in src.glob("*"):
+            if img.suffix.lower() not in IMG_EXTS:
+                continue
+            lbl = lbl_src / (img.stem + ".txt")
+            if not lbl.exists():
+                continue
+            img_dir = OUT / "images" / split
+            lbl_dir = OUT / "labels" / split
+            img_dir.mkdir(parents=True, exist_ok=True)
+            lbl_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(img, img_dir / img.name)
+            shutil.copy2(lbl, lbl_dir / lbl.name)
+            n += 1
+    if n:
+        print(f"Imported {n} frames from local DAID-T ({USER_DAID})")
+    return n
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--custom", help="folder of extra thermal frames (optional labels)")
     ap.add_argument("--clean", action="store_true", help="wipe dataset/ before prepare")
+    ap.add_argument("--merge-internet", action="store_true", help="include dataset_internet/")
     args = ap.parse_args()
 
     if args.clean and OUT.exists():
@@ -103,6 +162,11 @@ def main():
 
     if args.custom:
         add_custom_folder(Path(args.custom))
+
+    import_user_daid()
+    if args.merge_internet:
+        inet_n = import_internet_labeled()
+        print(f"Merged {inet_n} internet images (visual + thermal)")
 
     n_train = len(list((OUT / "images" / "train").glob("*")))
     n_val = len(list((OUT / "images" / "val").glob("*")))

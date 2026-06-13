@@ -64,14 +64,29 @@ The web UI includes live MJPEG video, sensitivity control, scope zoom/palette/br
 
 See [agm_deer_ml/README.md](agm_deer_ml/README.md) for dataset prep and training on CPU/GPU.
 
+## YEE TS3-19 scope (separate from Taipan)
+
+White-label **TS Series** thermal scope (384×288, 19 mm). WiFi SSID `XfdAp…`, open network, **Cam802** app — not RTSP like the Taipan.
+
+See **[yee/README.md](yee/README.md)** for manuals, pairing, USB notes, and PC streaming experiments.
+
+```powershell
+launch_yee_probe.bat          # probe scope WiFi (join XfdAp... first)
+launch_yee_probe.bat listen 60  # capture UDP while Cam802 runs on phone
+```
+
 ## Project layout
 
 ```
+agm_pi_scanner.py           # Pi edge scanner (low latency + distance audio)
+agm_distance.py             # Monocular distance estimation
+agm_pi_audio.py             # Tiered Pi audio cues
 agm_web_scanner.py          # Browser-based scanner (Flask)
 agm_deer_scanner.py         # Desktop OpenCV scanner + shared detection logic
 agm_scope_control.py        # ISAPI scope control (zoom, palette, image)
-agm_taipan_stream_explorer.py
-web/                        # Web UI (HTML, CSS, JS)
+yee_stream_probe.py         # YEE scope WiFi probe / UDP listener
+yee/                          # YEE TS3-19 docs + offline manuals (PDF)
+pi/                         # Pi deployment docs + systemd service
 agm_deer_ml/                # YOLO training scripts and docs
 requirements.txt
 ```

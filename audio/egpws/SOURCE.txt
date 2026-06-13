@@ -1,0 +1,7 @@
+deer_deer.wav is built from the user reference recording:
+  Documents/Sound recordings/Recording (autosaved).m4a
+
+Regenerate after re-recording:
+  python audio/egpws/generate_deer_voice.py
+
+Reference MK-VIII terrain clip: terrain.wav (FlightGear FGDATA, GPL-2.0)

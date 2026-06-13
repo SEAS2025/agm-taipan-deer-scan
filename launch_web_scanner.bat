@@ -9,7 +9,7 @@ echo  Connect laptop to Taipan WiFi hotspot first.
 echo ============================================================
 echo.
 
-python agm_web_scanner.py
+python agm_web_scanner.py --auto-train
 set EXITCODE=%ERRORLEVEL%
 if %EXITCODE% NEQ 0 (
     echo.

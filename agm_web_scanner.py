@@ -27,18 +27,26 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 
 from agm_deer_scanner import (
     DEER_PROFILE,
-    AlertManager,
     Detection,
     YoloDeerDetector,
     make_detector,
 )
+from agm_deer_alert import assess_nearest_threat
+from agm_distance import DistanceEstimator
+from agm_pi_audio import PiAudioAlerts
 from agm_scope_control import ScopeControl
+from agm_llm import LLMAssistant
+from agm_training_manager import get_status, is_running, start_pipeline
 
 DEFAULT_URL = "rtsp://admin:abcd1234@10.15.12.1:554/Streaming/Channels/101"
 WEB_DIR = Path(__file__).resolve().parent / "web"
 SNAPSHOT_DIR = Path(__file__).resolve().parent / "snapshots"
+FEEDER_DIR = SNAPSHOT_DIR / "feeder"
+FEEDER_LOG = Path(__file__).resolve().parent / "agm_deer_ml" / "runs" / "feeder_session.json"
 
 app = Flask(__name__, static_folder=str(WEB_DIR / "static"), static_url_path="/static")
+
+llm = LLMAssistant()
 
 
 @dataclass
@@ -49,6 +57,7 @@ class ScanState:
     yolo_conf: float = 0.35
     use_yolo: bool = False
     muted: bool = False
+    detection_enabled: bool = True
     status: str = "STARTING"
     fps: float = 0.0
     armed: bool = False
@@ -63,8 +72,13 @@ class ScanState:
 
 state = ScanState()
 detector = None
-alerts: Optional[AlertManager] = None
+alerts: Optional[PiAudioAlerts] = None
+dist_estimator = DistanceEstimator.load()
 scope: Optional[ScopeControl] = None
+snapshot_every_s: float = 0.0
+feeder_mode: bool = False
+_last_snapshot_t = 0.0
+_last_armed = False
 
 
 def draw_hud(
@@ -74,12 +88,15 @@ def draw_hud(
     fps: float,
     armed: bool,
     sens: float,
+    eff_threshold: float | None = None,
+    detection_on: bool = True,
 ):
     out = frame.copy()
     h, w = out.shape[:2]
+    thresh = eff_threshold if eff_threshold is not None else DEER_PROFILE["score_threshold"]
     for d in dets:
         x, y, bw, bh = d.bbox
-        is_deer = d.score >= DEER_PROFILE["score_threshold"]
+        is_deer = d.score >= thresh
         color = (0, 0, 255) if is_deer else (0, 165, 255)
         cv2.rectangle(out, (x, y), (x + bw, y + bh), color, 3 if is_deer else 1)
         cv2.putText(
@@ -94,11 +111,12 @@ def draw_hud(
     cx, cy = w // 2, h // 2
     cv2.line(out, (cx - 30, cy), (cx + 30, cy), (0, 255, 0), 1)
     cv2.line(out, (cx, cy - 30), (cx, cy + 30), (0, 255, 0), 1)
-    bar_color = (0, 0, 255) if armed else (0, 200, 0)
+    bar_color = (0, 0, 255) if armed else ((100, 100, 100) if not detection_on else (0, 200, 0))
     cv2.rectangle(out, (0, 0), (w, 36), (0, 0, 0), -1)
+    sens_label = f"sens {sens:.1f}" if detection_on else "DETECTION OFF"
     cv2.putText(
         out,
-        f"DEER SCAN | {status} | {fps:.1f} FPS | sens {sens:.1f}",
+        f"DEER SCAN | {status} | {fps:.1f} FPS | {sens_label}",
         (8, 24),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.6,
@@ -166,12 +184,19 @@ class DemoFeed:
 def process_frame(frame: np.ndarray, confirm_streak: int, score_threshold: float) -> tuple[np.ndarray, str, bool, int, int, int]:
     with state.lock:
         sens = state.yolo_conf if state.use_yolo else state.sensitivity
+        use_yolo = state.use_yolo
+        detection_on = state.detection_enabled
+
+    if not detection_on:
+        display = draw_hud(frame, [], "DETECTION OFF", 0.0, False, sens, detection_on=False)
+        return display, "DETECTION OFF", False, 0, 0, 0
 
     dets = detector.detect(frame)
-    if state.use_yolo:
-        deer_hits = [d for d in dets if d.score >= sens]
+    if use_yolo:
+        eff = sens
+        deer_hits = [d for d in dets if d.score >= eff]
     else:
-        eff = score_threshold / max(sens, 0.5)
+        eff = score_threshold / max(sens, 0.35)
         deer_hits = [d for d in dets if d.score >= eff]
 
     if deer_hits:
@@ -182,22 +207,58 @@ def process_frame(frame: np.ndarray, confirm_streak: int, score_threshold: float
     armed = confirm_streak >= DEER_PROFILE["confirm_frames"]
     if armed:
         status = f"DEER ALERT ({len(deer_hits)})"
-        if alerts:
-            with state.lock:
-                alerts.muted = state.muted
-            alerts.trigger(len(deer_hits))
+        if alerts and deer_hits:
+            fh, fw = frame.shape[:2]
+            threat = assess_nearest_threat(deer_hits, fw, dist_estimator)
+            if threat:
+                with state.lock:
+                    alerts.muted = state.muted
+                alerts.trigger_threat(threat)
         confirm_streak = 0
     elif deer_hits:
         status = f"TRACKING ({len(deer_hits)})"
     else:
         status = "SCANNING"
 
-    display = draw_hud(frame, dets, status, 0.0, armed, sens)
+    display = draw_hud(frame, dets, status, 0.0, armed, sens, eff_threshold=eff)
     return display, status, armed, len(dets), len(deer_hits), confirm_streak
 
 
+def _write_feeder_log(name: str, reason: str, armed: bool, det_n: int, deer_n: int) -> None:
+    import json
+
+    FEEDER_LOG.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "time": datetime.now().isoformat(timespec="seconds"),
+        "filename": name,
+        "reason": reason,
+        "armed": armed,
+        "detections": det_n,
+        "deer_hits": deer_n,
+        "fps": state.fps,
+        "connected": state.connected,
+        "status": state.status,
+    }
+    FEEDER_LOG.write_text(json.dumps(entry, indent=2), encoding="utf-8")
+
+
+def save_snapshot(reason: str = "manual", *, armed: bool = False, det_n: int = 0, deer_n: int = 0) -> Optional[str]:
+    """Save current HUD frame; returns filename or None."""
+    with state.jpeg_lock:
+        data = state.jpeg
+    if not data:
+        return None
+    dest = FEEDER_DIR if feeder_mode else SNAPSHOT_DIR
+    dest.mkdir(parents=True, exist_ok=True)
+    name = f"feeder_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg" if feeder_mode else f"deer_scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+    (dest / name).write_bytes(data)
+    if feeder_mode:
+        _write_feeder_log(name, reason, armed, det_n, deer_n)
+    return name
+
+
 def capture_loop():
-    global detector, alerts
+    global detector, alerts, _last_snapshot_t, _last_armed
     cap = None
     demo: Optional[DemoFeed] = None
     confirm_streak = 0
@@ -275,12 +336,38 @@ def capture_loop():
                 status = state.status
                 armed = state.armed
                 sens = state.yolo_conf if state.use_yolo else state.sensitivity
-            display = draw_hud(frame, [], status, fps, armed, sens)
+                det_on = state.detection_enabled
+            if det_on:
+                display = draw_hud(frame, [], status, fps, armed, sens)
+            else:
+                display = draw_hud(frame, [], "DETECTION OFF", fps, False, sens, detection_on=False)
 
         ok_enc, buf = cv2.imencode(".jpg", display, [cv2.IMWRITE_JPEG_QUALITY, 82])
         if ok_enc:
             with state.jpeg_lock:
                 state.jpeg = buf.tobytes()
+
+        if snapshot_every_s > 0 and time.time() - _last_snapshot_t >= snapshot_every_s:
+            with state.lock:
+                armed_now = state.armed
+                det_n = state.detections
+                deer_n = state.deer_hits
+            save_snapshot("interval", armed=armed_now, det_n=det_n, deer_n=deer_n)
+            _last_snapshot_t = time.time()
+
+        with state.lock:
+            armed_now = state.armed
+            det_n = state.detections
+            deer_n = state.deer_hits
+        if armed_now and not _last_armed:
+            save_snapshot("deer_alert", armed=True, det_n=det_n, deer_n=deer_n)
+        _last_armed = armed_now
+
+
+@app.route("/audio/deer_deer.wav")
+def deer_audio():
+    clip_dir = Path(__file__).resolve().parent / "audio" / "egpws"
+    return send_from_directory(clip_dir, "deer_deer.wav")
 
 
 @app.route("/")
@@ -301,6 +388,65 @@ def video():
     return Response(gen(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
+def _scan_context() -> dict:
+    with state.lock:
+        ctx = {
+            "status": state.status,
+            "fps": state.fps,
+            "armed": state.armed,
+            "detections": state.detections,
+            "deer_hits": state.deer_hits,
+            "connected": state.connected,
+            "use_yolo": state.use_yolo,
+            "demo": state.demo,
+        }
+    ctx["training"] = get_status()
+    ctx["llm"] = llm.status()
+    return ctx
+
+
+@app.route("/api/llm/status")
+def api_llm_status():
+    return jsonify(llm.status())
+
+
+@app.route("/api/llm/chat", methods=["POST"])
+def api_llm_chat():
+    data = request.get_json(force=True, silent=True) or {}
+    message = (data.get("message") or "").strip()
+    if not message:
+        return jsonify(ok=False, error="empty message"), 400
+    result = llm.chat(message, _scan_context())
+    return jsonify(result)
+
+
+@app.route("/api/llm/analyze", methods=["POST"])
+def api_llm_analyze():
+    with state.jpeg_lock:
+        frame = state.jpeg
+    if not frame:
+        return jsonify(ok=False, error="no frame"), 503
+    result = llm.analyze_frame(frame, _scan_context())
+    return jsonify(result)
+
+
+@app.route("/api/training/status")
+def api_training_status():
+    return jsonify(get_status())
+
+
+@app.route("/api/training/start", methods=["POST"])
+def api_training_start():
+    data = request.get_json(force=True, silent=True) or {}
+    result = start_pipeline(
+        epochs=int(data.get("epochs", 30)),
+        batch=int(data.get("batch", 4)),
+        max_visual=int(data.get("max_visual", 80)),
+        max_thermal=int(data.get("max_thermal", 40)),
+    )
+    return jsonify(result)
+
+
 @app.route("/api/status")
 def api_status():
     with state.lock:
@@ -317,6 +463,7 @@ def api_status():
             muted=state.muted,
             use_yolo=state.use_yolo,
             demo=state.demo,
+            detection_enabled=state.detection_enabled,
             scope=scope_info,
         )
 
@@ -330,9 +477,22 @@ def api_sensitivity():
             state.yolo_conf = max(0.15, min(0.85, val))
             detector.conf = state.yolo_conf
         else:
-            state.sensitivity = max(0.5, min(2.0, val))
+            state.sensitivity = max(0.35, min(3.0, val))
             detector.state.sensitivity = state.sensitivity
-    return jsonify(ok=True)
+    return jsonify(ok=True, sensitivity=state.sensitivity if not state.use_yolo else state.yolo_conf)
+
+
+@app.route("/api/detection", methods=["POST"])
+def api_detection():
+    data = request.get_json(force=True, silent=True) or {}
+    with state.lock:
+        state.detection_enabled = bool(data.get("enabled", True))
+        if not state.detection_enabled:
+            state.armed = False
+            state.deer_hits = 0
+            state.detections = 0
+            state.status = "DETECTION OFF"
+    return jsonify(ok=True, enabled=state.detection_enabled)
 
 
 @app.route("/api/mute", methods=["POST"])
@@ -354,15 +514,25 @@ def api_reconnect():
 
 @app.route("/api/snapshot", methods=["POST"])
 def api_snapshot():
-    SNAPSHOT_DIR.mkdir(exist_ok=True)
+    with state.lock:
+        armed = state.armed
+        det_n = state.detections
+        deer_n = state.deer_hits
+    name = save_snapshot("manual", armed=armed, det_n=det_n, deer_n=deer_n)
+    if not name:
+        return jsonify(ok=False, error="no frame"), 503
+    sub = "feeder" if feeder_mode else ""
+    url = f"/snapshots/feeder/{name}" if sub else f"/snapshots/{name}"
+    return jsonify(ok=True, filename=name, url=url)
+
+
+@app.route("/api/frame.jpg")
+def api_frame_jpg():
     with state.jpeg_lock:
         data = state.jpeg
     if not data:
         return jsonify(ok=False, error="no frame"), 503
-    name = f"deer_scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-    path = SNAPSHOT_DIR / name
-    path.write_bytes(data)
-    return jsonify(ok=True, filename=name, url=f"/snapshots/{name}")
+    return Response(data, mimetype="image/jpeg")
 
 
 @app.route("/snapshots/<path:filename>")
@@ -382,8 +552,10 @@ def api_scope_zoom():
 def api_scope_palette():
     data = request.get_json(force=True, silent=True) or {}
     if scope and scope.enabled:
-        scope.set_palette(int(data.get("index", 0)))
-    return jsonify(ok=True)
+        idx = int(data.get("index", 0))
+        scope.set_palette(idx)
+        return jsonify(ok=True, palette_index=idx, palette_name=scope.palette_name)
+    return jsonify(ok=False, error="scope unavailable")
 
 
 @app.route("/api/scope/image", methods=["POST"])
@@ -425,7 +597,15 @@ def main():
     ap.add_argument("--no-audio", action="store_true")
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--model", help="YOLO .pt weights path")
+    ap.add_argument("--auto-train", action="store_true", help="Start dataset fetch + training on launch")
+    ap.add_argument("--train-epochs", type=int, default=30)
+    ap.add_argument("--feeder", action="store_true", help="Tripod feeder watch: auto-snapshots to snapshots/feeder/")
+    ap.add_argument("--snapshot-every", type=float, default=0, metavar="SEC", help="Auto-save JPEG every N seconds (60 with --feeder)")
     args = ap.parse_args()
+
+    global snapshot_every_s, feeder_mode
+    feeder_mode = args.feeder
+    snapshot_every_s = args.snapshot_every or (60.0 if args.feeder else 0.0)
 
     detector = make_detector(args.model)
     state.use_yolo = isinstance(detector, YoloDeerDetector)
@@ -435,18 +615,26 @@ def main():
         state.sensitivity = detector.state.sensitivity
     state.url = args.url
     state.demo = args.demo
-    alerts = AlertManager(enabled=not args.no_audio)
+    alerts = PiAudioAlerts(enabled=not args.no_audio, voice=True)
     init_scope(args.scope_host, args.demo)
 
     t = threading.Thread(target=capture_loop, name="capture", daemon=True)
     t.start()
 
+    if args.auto_train and not is_running():
+        print("Starting training pipeline (fetch internet deer images + YOLO train)…")
+        start_pipeline(epochs=args.train_epochs, batch=4)
+
     url = f"http://{args.host}:{args.port}/"
     print(f"AGM Web Scanner running at {url}")
+    print(f"Text assistant backend: {llm.backend}")
     if args.demo:
         print("Demo mode — synthetic thermal feed.")
     else:
         print("Connect laptop to Taipan hotspot for video.")
+    if feeder_mode:
+        print(f"Feeder mode — snapshots every {snapshot_every_s:.0f}s -> {FEEDER_DIR}")
+        print(f"Session log: {FEEDER_LOG}")
     if not args.no_browser:
         threading.Timer(1.2, lambda: webbrowser.open(url)).start()
 

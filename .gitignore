@@ -9,6 +9,7 @@ venv/
 # ML artifacts (download/train locally)
 agm_deer_ml/dataset/
 agm_deer_ml/dataset_raw/
+agm_deer_ml/dataset_internet/
 agm_deer_ml/runs/
 agm_deer_ml/Drone-based-wildlife-monitoring/
 agm_deer_ml/*.pt
@@ -26,3 +27,18 @@ snapshots/
 Thumbs.db
 .idea/
 .vscode/
+
+# Local tools / secrets (SSH keys, one-off scripts)
+.tools/
+
+# Root-level model weights (train or download locally)
+/*.pt
+weights/
+
+# Large ML datasets (prepare locally)
+agm_deer_ml/dataset_combined/
+agm_deer_ml/dataset_real/
+agm_deer_ml/calib_*/
+agm_deer_ml/rf_datasets/
+agm_deer_ml/blob_preview/
+agm_deer_ml/*_preview.png

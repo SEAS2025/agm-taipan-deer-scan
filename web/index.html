@@ -51,12 +51,17 @@
     <aside class="controls">
       <section class="panel">
         <h2>Detection</h2>
+        <p class="control-hint panel-intro">YOLO object detection (computer vision) — not a language model.</p>
+        <label class="toggle-row">
+          <span>Deer detection</span>
+          <input type="checkbox" id="detectionToggle" checked>
+        </label>
         <label class="control-label">
           Sensitivity
           <span id="sensVal" class="control-value">1.0</span>
         </label>
         <input type="range" id="sens" min="0" max="100" value="33">
-        <p class="control-hint">Lower = fewer alerts</p>
+        <p class="control-hint">Slide left = fewer alerts · right = more sensitive</p>
         <div class="btn-row">
           <button type="button" id="muteBtn" class="btn btn-secondary">Mute audio</button>
           <button type="button" id="snapshotBtn" class="btn btn-secondary">Snapshot</button>
@@ -97,6 +102,31 @@
           <div><dt>Mode</dt><dd id="demoFlag">Live</dd></div>
         </dl>
         <p class="footer-hint">F11 for fullscreen · Connect to Taipan hotspot for live video and scope control</p>
+      </section>
+
+      <section class="panel llm-panel">
+        <h2>Scan Assistant <span id="llmBackend" class="llm-badge">local</span></h2>
+        <p class="control-hint panel-intro">Optional text chat about the scan — separate from the YOLO deer detector.</p>
+        <div id="chatLog" class="chat-log"></div>
+        <div class="chat-input-row">
+          <input type="text" id="chatInput" class="chat-input" placeholder="Ask about detections, training…" autocomplete="off">
+          <button type="button" id="chatSendBtn" class="btn btn-primary chat-send">Send</button>
+        </div>
+        <button type="button" id="analyzeBtn" class="btn btn-secondary">Analyze current frame</button>
+      </section>
+
+      <section class="panel training-panel">
+        <h2>YOLO Training</h2>
+        <p class="control-hint panel-intro">Train the deer detector (computer vision model).</p>
+        <p id="trainPhase" class="train-phase">Idle</p>
+        <div class="progress-bar"><div id="trainProgress" class="progress-fill"></div></div>
+        <p id="trainMessage" class="train-message">—</p>
+        <dl class="stats train-stats">
+          <div><dt>Visual</dt><dd id="trainVisual">0</dd></div>
+          <div><dt>Thermal</dt><dd id="trainThermal">0</dd></div>
+          <div><dt>Train set</dt><dd id="trainTotal">0</dd></div>
+        </dl>
+        <button type="button" id="trainStartBtn" class="btn btn-primary">Start training pipeline</button>
       </section>
     </aside>
   </main>

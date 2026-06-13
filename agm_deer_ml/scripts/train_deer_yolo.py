@@ -41,22 +41,39 @@ def main():
     ap.add_argument("--device", default="", help="cuda:0 or cpu (auto if blank)")
     ap.add_argument("--project", default=str(ROOT / "runs"))
     ap.add_argument("--name", default="deer_thermal")
+    ap.add_argument("--data", default="", help="explicit data.yaml (overrides default DAID-T set)")
+    ap.add_argument("--patience", type=int, default=30)
+    ap.add_argument("--no-aug", action="store_true", help="disable extra vehicle-motion augmentation")
     args = ap.parse_args()
 
-    train_img = ROOT / "dataset" / "images" / "train"
-    if not train_img.exists() or not any(train_img.iterdir()):
-        raise SystemExit("No training images. Run: python scripts/prepare_dataset.py --clean")
-
-    write_data_yaml()
+    if args.data:
+        data_yaml = Path(args.data)
+        if not data_yaml.exists():
+            raise SystemExit(f"--data not found: {data_yaml}")
+    else:
+        train_img = ROOT / "dataset" / "images" / "train"
+        if not train_img.exists() or not any(train_img.iterdir()):
+            raise SystemExit("No training images. Run: python scripts/prepare_dataset.py --clean")
+        write_data_yaml()
+        data_yaml = DATA_YAML
 
     from ultralytics import YOLO
 
     model = YOLO(args.model)
-    print(f"Training {args.model} on thermal dataset ({args.epochs} epochs, imgsz={args.imgsz})")
-    print("Note: DAID-T class is generic 'animal' — mapped to 'deer' for roadside use.\n")
+    print(f"Training {args.model} on {data_yaml} ({args.epochs} epochs, imgsz={args.imgsz})")
+
+    # Augmentation tuned to simulate a moving-vehicle deployment: mosaic mixes
+    # backgrounds, blur/motion approximate vehicle vibration + speed, and the
+    # dataset already includes polarity-inverted copies for white/black-hot.
+    aug = {} if args.no_aug else dict(
+        mosaic=1.0, mixup=0.15, close_mosaic=10,
+        hsv_h=0.0, hsv_s=0.0, hsv_v=0.4,   # grayscale: only brightness jitter
+        degrees=5.0, translate=0.1, scale=0.5, shear=2.0,
+        fliplr=0.5, erasing=0.3,
+    )
 
     results = model.train(
-        data=str(DATA_YAML),
+        data=str(data_yaml),
         epochs=args.epochs,
         imgsz=args.imgsz,
         batch=args.batch,
@@ -64,10 +81,11 @@ def main():
         project=args.project,
         name=args.name,
         exist_ok=True,
-        patience=10,
+        patience=args.patience,
         save=True,
         plots=True,
         verbose=True,
+        **aug,
     )
 
     best = Path(args.project) / args.name / "weights" / "best.pt"

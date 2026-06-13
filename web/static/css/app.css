@@ -94,6 +94,12 @@ code {
   border: 1px solid rgba(61, 255, 154, 0.25);
 }
 
+.badge.off {
+  background: rgba(120, 120, 120, 0.15);
+  color: var(--muted);
+  border: 1px solid rgba(120, 120, 120, 0.3);
+}
+
 .badge.alert {
   background: rgba(255, 51, 68, 0.2);
   color: #ff8894;
@@ -107,12 +113,95 @@ code {
 
 .layout {
   display: grid;
-  grid-template-columns: 1fr 320px;
+  grid-template-columns: 1fr 340px;
   min-height: calc(100vh - 72px);
 }
 
 @media (max-width: 960px) {
   .layout { grid-template-columns: 1fr; }
+}
+
+.llm-badge {
+  font-size: 0.65rem;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(61, 255, 154, 0.15);
+  color: var(--accent);
+  letter-spacing: 0.08em;
+  vertical-align: middle;
+}
+
+.chat-log {
+  height: 140px;
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 10px;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  margin-bottom: 8px;
+}
+
+.chat-msg { margin-bottom: 8px; }
+.chat-msg.user { color: var(--accent); }
+.chat-msg.bot { color: var(--text); }
+.chat-msg.system { color: var(--muted); font-size: 0.75rem; }
+
+.chat-input-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.chat-input {
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: var(--display);
+  font-size: 0.95rem;
+}
+
+.chat-send { margin-top: 0; padding: 10px 14px; }
+
+.train-phase {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--accent);
+  margin-bottom: 8px;
+}
+
+.progress-bar {
+  height: 6px;
+  background: var(--bg);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+  transition: width 0.4s ease;
+}
+
+.train-message {
+  font-size: 0.78rem;
+  color: var(--muted);
+  line-height: 1.4;
+  margin-bottom: 10px;
+  min-height: 2.5em;
+}
+
+.train-stats { margin-bottom: 12px; }
+
+#trainStartBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .video-panel {
@@ -214,6 +303,22 @@ code {
   font-size: 0.75rem;
   color: var(--muted);
   margin-top: 4px;
+}
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+.toggle-row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+  cursor: pointer;
 }
 
 input[type="range"] {
