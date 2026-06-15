@@ -1,0 +1,10 @@
+Hilton Head Island storm radar summary
+Generated: 2026-06-14T20:37:46.208173+00:00
+Radar site: KCLX (Charleston, SC)
+Scan: 2026/06/14/KCLX/KCLX20260614_202658_V06
+Scan time (UTC): 2026-06-14 20:26
+Max reflectivity near Hilton Head: 54.6 dBZ
+Area with echo >= 20 dBZ (approx): 11522 km^2
+
+NWS forecast (this afternoon): Showers and thunderstorms likely, 60% PoP.
+Heat index up to ~103 F. Heat Advisory in effect until 6 PM EDT.
